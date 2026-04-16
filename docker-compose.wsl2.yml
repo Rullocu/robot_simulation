@@ -1,0 +1,13 @@
+# WSL2 override — merge with the base file:
+#   docker compose -f docker-compose.yml -f docker-compose.wsl2.yml up
+#
+# Adds the WSLg Wayland/audio socket and the matching environment variables
+# that only exist inside a WSL2 environment.
+
+services:
+  sim:
+    environment:
+      - WAYLAND_DISPLAY=${WAYLAND_DISPLAY}
+      - PULSE_SERVER=${PULSE_SERVER}
+    volumes:
+      - /mnt/wslg:/mnt/wslg:rw

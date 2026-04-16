@@ -11,15 +11,10 @@ services:
       - QT_X11_NO_MITSHM=1
       - XDG_RUNTIME_DIR=/tmp/runtime-root
       - ROS_DOMAIN_ID=0
-      # WSLg-specific
-      - WAYLAND_DISPLAY=${WAYLAND_DISPLAY}
-      - PULSE_SERVER=${PULSE_SERVER}
-      # Uncomment if Gazebo/RViz segfaults on WSL GPU stack:
+      # Software rendering fallback — uncomment if RViz segfaults:
       # - LIBGL_ALWAYS_SOFTWARE=1
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      # WSLg socket for GUI on Windows
-      - /mnt/wslg:/mnt/wslg:rw
       # Bind-mount the custom package (edit on host, runs in container)
       - ./src/lite6_pick_place:/ws/src/lite6_pick_place
       # Bind-mount runtime config (edit without rebuilding)
@@ -32,16 +27,17 @@ services:
     #   colcon build --packages-select lite6_pick_place --symlink-install
     #   source install/setup.bash
     #   ros2 launch lite6_pick_place pick_place.launch.py
-    command: >
-      bash -c "
-        source /opt/ros/jazzy/setup.bash &&
-        cd /ws &&
-        colcon build --packages-select lite6_pick_place --symlink-install
-          --cmake-args -DCMAKE_BUILD_TYPE=Release 2>&1 | tail -5 &&
-        source install/setup.bash &&
-        echo '====================================================' &&
-        echo 'Package built. Run the simulation with:' &&
-        echo '  ros2 launch lite6_pick_place pick_place.launch.py' &&
-        echo '====================================================' &&
+    command:
+      - bash
+      - -c
+      - |
+        source /opt/ros/jazzy/setup.bash
+        cd /ws
+        colcon build --packages-select lite6_pick_place --symlink-install \
+          --cmake-args -DCMAKE_BUILD_TYPE=Release 2>&1 | tail -5
+        source install/setup.bash
+        echo '===================================================='
+        echo 'Package built. Run the simulation with:'
+        echo '  ros2 launch lite6_pick_place pick_place.launch.py'
+        echo '===================================================='
         exec bash
-      "
