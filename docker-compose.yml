@@ -1,0 +1,27 @@
+services:
+  sim:
+    build: .
+    image: lite6-pick-place:jazzy
+    container_name: lite6_sim
+    network_mode: host
+    ipc: host
+    privileged: true
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - XDG_RUNTIME_DIR=/tmp/runtime-root
+      - ROS_DOMAIN_ID=0
+      # WSLg-specific — uncomment on WSL2
+      # - WAYLAND_DISPLAY=${WAYLAND_DISPLAY}
+      # - PULSE_SERVER=${PULSE_SERVER}
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # WSLg socket for GUI on Windows
+      - /mnt/wslg:/mnt/wslg:rw
+      # Bind-mount your own package so you can edit on the host
+      - ./src/lite6_pick_place:/ws/src/lite6_pick_place
+      # Bind-mount configs
+      - ./config:/ws/config
+    stdin_open: true
+    tty: true
+    command: bash
