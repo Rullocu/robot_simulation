@@ -1,0 +1,76 @@
+# ============================================================
+#  Lite6 Pick-and-Place — configurable parameters
+#  All lengths in metres, angles in radians
+# ============================================================
+pick_place_node:
+  ros__parameters:
+
+    # ----------------------------------------------------------
+    # Product grid  (cols × rows × layers = total products)
+    # Default from spec: 3 × 5 × 10 = 150 products
+    # ----------------------------------------------------------
+    grid_cols:   3        # products along X axis
+    grid_rows:   5        # products along Y axis
+    grid_layers: 10       # products stacked in Z
+
+    # ----------------------------------------------------------
+    # Individual product dimensions
+    # ----------------------------------------------------------
+    product_size_x: 0.040   # 40 mm
+    product_size_y: 0.040   # 40 mm
+    product_size_z: 0.030   # 30 mm
+
+    # ----------------------------------------------------------
+    # Box positions — defined as the centre of the bottom face
+    # (inner floor) of each box.
+    # Grid X-span  = grid_cols  * product_size_x = 0.12 m
+    # Grid Y-span  = grid_rows  * product_size_y = 0.20 m
+    # Grid Z-span  = grid_layers * product_size_z = 0.30 m
+    # Keep boxes within Lite6 reach (~0.44 m from base).
+    # ----------------------------------------------------------
+    source_box_x: 0.230     # metres in front of robot
+    source_box_y: 0.180     # metres to the right
+    source_box_z: 0.050     # height of box floor above robot base
+
+    target_box_x: 0.230
+    target_box_y: -0.180    # metres to the left
+    target_box_z: 0.050
+
+    # Box wall thickness (metres) used for collision objects
+    box_wall_thickness: 0.004
+
+    # ----------------------------------------------------------
+    # Motion parameters
+    # ----------------------------------------------------------
+    approach_height: 0.080  # metres above product centre before descend
+    retreat_height:  0.120  # metres above product centre after pick/place
+
+    # MoveIt2 planning group and end-effector link.
+    # With add_gripper:=true the TCP link is 'link_tcp'.
+    # Without gripper use 'link_eef'.
+    arm_group:    "lite6"
+    eef_link:     "link_tcp"
+    base_frame:   "world"
+
+    # Planner tuning
+    planning_time:           5.0
+    velocity_scaling:        0.3
+    acceleration_scaling:    0.3
+    max_planning_attempts:   5
+
+    # ----------------------------------------------------------
+    # Demo limiter  (-1 = run all products)
+    # Set to a small number (e.g. 6) for a quick first run.
+    # ----------------------------------------------------------
+    max_products: 6
+
+    # ----------------------------------------------------------
+    # Pick orientation — quaternion for EEF pointing straight
+    # down (RPY = π, 0, 0 → x=1, y=0, z=0, w=0).
+    # Adjust yaw (rotation around world-Z) to align gripper
+    # fingers with a product edge if needed.
+    # ----------------------------------------------------------
+    pick_orientation_x: 1.0
+    pick_orientation_y: 0.0
+    pick_orientation_z: 0.0
+    pick_orientation_w: 0.0
