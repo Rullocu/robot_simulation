@@ -2,99 +2,140 @@
 """
 motion_planner.py
 =================
-Thin wrapper around MoveItPy for the pick-and-place pipeline.
+Motion planning and execution via MoveIt2 ROS2 services/actions.
+No moveit_py required — only moveit_msgs + rclpy action client.
 
-Responsibilities
-----------------
-- Move the arm to a named state ("home") or to an arbitrary Cartesian pose.
-- Execute a pick sequence:
-    1. Move to approach pose (above product)
-    2. Move straight down to grasp pose
-    3. Attach the product collision object (simulates closing the gripper)
-    4. Retreat straight up
-- Execute a place sequence:
-    1. Move to approach pose (above target)
-    2. Move straight down to place pose
-    3. Detach the product collision object (simulates opening the gripper)
-    4. Retreat straight up
+Services used
+-------------
+  /plan_kinematic_path  (moveit_msgs/srv/GetMotionPlan)
+  /apply_planning_scene (moveit_msgs/srv/ApplyPlanningScene)
 
-Gripper note
+Actions used
 ------------
-The Lite6 gripper is declared as a passive (fixed) joint in xarm_ros2's
-SRDF, so it cannot be actuated through MoveIt2 in fake-hardware mode.
-Grasping is therefore simulated by attaching/detaching the product's
-collision object to the robot's EEF link.  The gripper mesh is still
-rendered in RViz so the visual is convincing.
+  /execute_trajectory   (moveit_msgs/action/ExecuteTrajectory)
 """
 
 from __future__ import annotations
 
-import copy
 import time
-from typing import Optional
+from typing import Optional, Tuple
 
-import rclpy
+from rclpy.action import ActionClient
 from rclpy.node import Node
 
-from geometry_msgs.msg import Pose, PoseStamped
-from moveit_msgs.msg import AttachedCollisionObject, CollisionObject
-from moveit.core.robot_state import RobotState
-from moveit.planning import MoveItPy
+from geometry_msgs.msg import Pose
+from moveit_msgs.action import ExecuteTrajectory
+from moveit_msgs.msg import (
+    BoundingVolume,
+    Constraints,
+    JointConstraint,
+    MotionPlanRequest,
+    OrientationConstraint,
+    PositionConstraint,
+)
+from moveit_msgs.srv import ApplyPlanningScene, GetMotionPlan
+from shape_msgs.msg import SolidPrimitive
+
+from .scene_manager import SceneManager
 
 
-# -------------------------------------------------------------------------
-# Helpers
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
-def _stamped(x: float, y: float, z: float,
-             qx: float, qy: float, qz: float, qw: float,
-             frame_id: str) -> PoseStamped:
-    ps = PoseStamped()
-    ps.header.frame_id = frame_id
-    ps.pose.position.x = x
-    ps.pose.position.y = y
-    ps.pose.position.z = z
-    ps.pose.orientation.x = qx
-    ps.pose.orientation.y = qy
-    ps.pose.orientation.z = qz
-    ps.pose.orientation.w = qw
-    return ps
+def _wait(future, timeout: float = 30.0):
+    """Block (busy-wait) until a future is done. Node must be spinning elsewhere."""
+    deadline = time.monotonic() + timeout
+    while not future.done():
+        if time.monotonic() > deadline:
+            return None
+        time.sleep(0.02)
+    return future.result()
 
 
-# -------------------------------------------------------------------------
+def _pose(x: float, y: float, z: float,
+          qx: float, qy: float, qz: float, qw: float) -> Pose:
+    p = Pose()
+    p.position.x = x
+    p.position.y = y
+    p.position.z = z
+    p.orientation.x = qx
+    p.orientation.y = qy
+    p.orientation.z = qz
+    p.orientation.w = qw
+    return p
+
+
+def _build_pose_constraints(frame_id: str, link_name: str,
+                             goal: Pose,
+                             pos_tol: float = 0.002,
+                             orient_tol: float = 0.02) -> Constraints:
+    """Build a Constraints message for a single Cartesian pose goal."""
+    # Position constraint: small sphere around target
+    prim = SolidPrimitive(type=SolidPrimitive.SPHERE, dimensions=[pos_tol])
+    bvol = BoundingVolume()
+    bvol.primitives.append(prim)
+    bvol.primitive_poses.append(goal)
+
+    pos_c = PositionConstraint()
+    pos_c.header.frame_id = frame_id
+    pos_c.link_name = link_name
+    pos_c.constraint_region = bvol
+    pos_c.weight = 1.0
+
+    # Orientation constraint
+    ori_c = OrientationConstraint()
+    ori_c.header.frame_id = frame_id
+    ori_c.link_name = link_name
+    ori_c.orientation = goal.orientation
+    ori_c.absolute_x_axis_tolerance = orient_tol
+    ori_c.absolute_y_axis_tolerance = orient_tol
+    ori_c.absolute_z_axis_tolerance = orient_tol
+    ori_c.weight = 1.0
+
+    c = Constraints()
+    c.position_constraints.append(pos_c)
+    c.orientation_constraints.append(ori_c)
+    return c
+
+
+def _build_joint_constraints(joint_names: list[str],
+                               values: list[float],
+                               tol: float = 0.01) -> Constraints:
+    c = Constraints()
+    for name, val in zip(joint_names, values):
+        jc = JointConstraint()
+        jc.joint_name = name
+        jc.position = val
+        jc.tolerance_above = tol
+        jc.tolerance_below = tol
+        jc.weight = 1.0
+        c.joint_constraints.append(jc)
+    return c
+
+
+# ---------------------------------------------------------------------------
 # MotionPlanner
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+
+# Joint names for the lite6 planning group
+LITE6_JOINTS = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
+HOME_ANGLES   = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
 
 class MotionPlanner:
     """
-    Wraps MoveItPy to provide high-level pick/place primitives.
+    High-level pick/place motion via MoveIt2 plan+execute services.
 
-    Parameters
-    ----------
-    moveit : MoveItPy
-        Shared MoveItPy instance (created once by the node).
-    node : Node
-        The ROS2 node (used for logging).
-    arm_group : str
-        MoveIt2 planning group name (e.g. "lite6").
-    eef_link : str
-        End-effector link used for Cartesian pose goals (e.g. "link_tcp").
-    base_frame : str
-        Reference frame for all poses (e.g. "world").
-    planning_time : float
-        Maximum time (s) allowed per planning call.
-    vel_scale : float
-        Velocity scaling factor [0, 1].
-    acc_scale : float
-        Acceleration scaling factor [0, 1].
-    max_attempts : int
-        Number of replanning attempts on failure.
+    Grasping is simulated: the product CollisionObject is attached to the
+    EEF after descending (simulating closing the gripper) and detached
+    after arriving at the target (simulating opening the gripper).
     """
 
     def __init__(
         self,
-        moveit: MoveItPy,
         node: Node,
+        scene: SceneManager,
         arm_group: str,
         eef_link: str,
         base_frame: str,
@@ -102,187 +143,158 @@ class MotionPlanner:
         vel_scale: float,
         acc_scale: float,
         max_attempts: int,
-        orientation: tuple,
+        orientation: Tuple[float, float, float, float],
+        product_dims: Tuple[float, float, float],
     ):
-        self._moveit = moveit
-        self._node = node
-        self._arm_group = arm_group
-        self._eef_link = eef_link
-        self._frame = base_frame
-        self._planning_time = planning_time
-        self._vel_scale = vel_scale
-        self._acc_scale = acc_scale
-        self._max_attempts = max_attempts
-        # (qx, qy, qz, qw) for top-down approach
-        self._orientation = orientation
+        self._node        = node
+        self._scene       = scene
+        self._group       = arm_group
+        self._eef         = eef_link
+        self._frame       = base_frame
+        self._plan_time   = planning_time
+        self._vel         = vel_scale
+        self._acc         = acc_scale
+        self._max_att     = max_attempts
+        self._orient      = orientation       # (qx, qy, qz, qw)
+        self._prod_dims   = product_dims      # (sx, sy, sz) for detach
 
-        self._arm = moveit.get_planning_component(arm_group)
-        self._robot_model = moveit.get_robot_model()
+        # Service clients and action client
+        self._plan_cli = node.create_client(GetMotionPlan, "/plan_kinematic_path")
+        self._exec_cli = ActionClient(node, ExecuteTrajectory, "/execute_trajectory")
+
+        self._node.get_logger().info("Waiting for /plan_kinematic_path …")
+        self._plan_cli.wait_for_service(timeout_sec=30.0)
+        self._node.get_logger().info("Waiting for /execute_trajectory …")
+        self._exec_cli.wait_for_server(timeout_sec=30.0)
+        self._node.get_logger().info("Motion planner ready.")
 
     # ------------------------------------------------------------------
-    # High-level motions
+    # Public API
     # ------------------------------------------------------------------
 
     def move_home(self) -> bool:
-        """Move arm to the 'home' named state (all joints = 0)."""
-        self._arm.set_start_state_to_current_state()
-        self._arm.set_goal_state(configuration_name="home")
-        return self._plan_and_execute()
+        """Move arm to home (all joints = 0)."""
+        c = _build_joint_constraints(LITE6_JOINTS, HOME_ANGLES)
+        return self._plan_and_execute(c, label="home")
 
     def move_to_pose(self, x: float, y: float, z: float) -> bool:
-        """Move EEF to (x, y, z) with the default pick orientation."""
-        qx, qy, qz, qw = self._orientation
-        goal = _stamped(x, y, z, qx, qy, qz, qw, self._frame)
-        self._arm.set_start_state_to_current_state()
-        self._arm.set_goal_state(pose_stamped_msg=goal, pose_link=self._eef_link)
-        return self._plan_and_execute()
+        """Move EEF to (x, y, z) with the configured pick orientation."""
+        qx, qy, qz, qw = self._orient
+        goal = _pose(x, y, z, qx, qy, qz, qw)
+        c = _build_pose_constraints(self._frame, self._eef, goal)
+        return self._plan_and_execute(c, label=f"({x:.3f},{y:.3f},{z:.3f})")
 
-    def pick_product(
-        self,
-        px: float, py: float, pz: float,
-        approach_h: float,
-        retreat_h: float,
-        product_id: str,
-    ) -> bool:
-        """
-        Execute a pick sequence:
-          approach → descend → attach object → retreat
-        """
-        # 1. Approach (above the product)
+    def pick_product(self, px: float, py: float, pz: float,
+                     approach_h: float, retreat_h: float,
+                     product_id: str) -> bool:
+        """approach → descend → attach → retreat"""
+        log = self._node.get_logger()
+
         if not self.move_to_pose(px, py, pz + approach_h):
-            self._node.get_logger().warn(
-                f"[pick] Failed to reach approach for {product_id}")
+            log.warn(f"[pick] approach failed for {product_id}")
             return False
 
-        # 2. Descend to product centre
         if not self.move_to_pose(px, py, pz):
-            self._node.get_logger().warn(
-                f"[pick] Failed to descend to {product_id}")
+            log.warn(f"[pick] descend failed for {product_id}")
             return False
 
-        # 3. Simulate grasp: attach collision object to EEF
-        self._attach_object(product_id)
-        time.sleep(0.3)   # brief pause — looks more natural in RViz
+        # Simulate gripper close
+        self._scene.attach_to_eef(product_id, self._eef)
+        time.sleep(0.25)
 
-        # 4. Retreat
         if not self.move_to_pose(px, py, pz + retreat_h):
-            self._node.get_logger().warn(
-                f"[pick] Failed to retreat after picking {product_id}")
-            # Still return True — we did pick up the object
+            log.warn(f"[pick] retreat failed — object still attached")
 
         return True
 
-    def place_product(
-        self,
-        px: float, py: float, pz: float,
-        approach_h: float,
-        retreat_h: float,
-        product_id: str,
-    ) -> bool:
-        """
-        Execute a place sequence:
-          approach → descend → detach object → retreat
-        """
-        # 1. Approach
+    def place_product(self, px: float, py: float, pz: float,
+                      approach_h: float, retreat_h: float,
+                      product_id: str) -> bool:
+        """approach → descend → detach → retreat"""
+        log = self._node.get_logger()
+
         if not self.move_to_pose(px, py, pz + approach_h):
-            self._node.get_logger().warn(
-                f"[place] Failed to reach approach for {product_id}")
+            log.warn(f"[place] approach failed for {product_id}")
             return False
 
-        # 2. Descend to place position
         if not self.move_to_pose(px, py, pz):
-            self._node.get_logger().warn(
-                f"[place] Failed to descend to target for {product_id}")
+            log.warn(f"[place] descend failed for {product_id}")
             return False
 
-        # 3. Simulate release: detach collision object from EEF
-        self._detach_object(product_id, px, py, pz)
-        time.sleep(0.3)
+        # Simulate gripper open
+        sx, sy, sz = self._prod_dims
+        self._scene.detach_and_place(product_id, self._eef, px, py, pz, sx, sy, sz)
+        time.sleep(0.25)
 
-        # 4. Retreat
         if not self.move_to_pose(px, py, pz + retreat_h):
-            self._node.get_logger().warn(
-                f"[place] Failed to retreat after placing {product_id}")
+            log.warn(f"[place] retreat failed")
 
         return True
 
     # ------------------------------------------------------------------
-    # Internal
+    # Internal: plan + execute
     # ------------------------------------------------------------------
 
-    def _plan_and_execute(self) -> bool:
-        """Plan and execute with retry logic.  Returns True on success."""
-        for attempt in range(1, self._max_attempts + 1):
-            plan_result = self._arm.plan()
-            if plan_result:
-                self._moveit.execute(
-                    plan_result.trajectory,
-                    blocking=True,
-                    controllers=[],
-                )
-                return True
-            self._node.get_logger().warn(
-                f"Planning attempt {attempt}/{self._max_attempts} failed, retrying…"
-            )
-            self._arm.set_start_state_to_current_state()
-
-        self._node.get_logger().error("All planning attempts failed.")
+    def _plan_and_execute(self, goal_constraints: Constraints,
+                          label: str = "") -> bool:
+        for attempt in range(1, self._max_att + 1):
+            traj = self._plan(goal_constraints)
+            if traj is not None:
+                ok = self._execute(traj)
+                if ok:
+                    return True
+                self._node.get_logger().warn(
+                    f"Execution failed (attempt {attempt}), retrying…")
+            else:
+                self._node.get_logger().warn(
+                    f"Planning failed for '{label}' (attempt {attempt}/{self._max_att})")
+        self._node.get_logger().error(f"All attempts failed for '{label}'")
         return False
 
-    def _attach_object(self, object_id: str) -> None:
-        """Attach a collision object to the robot EEF (simulated grip)."""
-        with self._moveit.get_planning_scene_monitor().read_write() as scene:
-            scene.current_state.update()
-            # Build attached object: move from world into attached space
-            aco = AttachedCollisionObject()
-            aco.link_name = self._eef_link
-            aco.object.id = object_id
-            aco.object.operation = CollisionObject.ADD
-            # Allow the object to touch the EEF links
-            aco.touch_links = [self._eef_link, "link6", "link5"]
-            scene.current_state.update()
+    def _plan(self, goal_constraints: Constraints):
+        req_msg = MotionPlanRequest()
+        req_msg.group_name                   = self._group
+        req_msg.num_planning_attempts        = 3
+        req_msg.allowed_planning_time        = self._plan_time
+        req_msg.max_velocity_scaling_factor  = self._vel
+        req_msg.max_acceleration_scaling_factor = self._acc
+        req_msg.goal_constraints.append(goal_constraints)
+        # Leave start_state empty → move_group uses current robot state
 
-        # Use the PSM attach helper which handles the world → attached move
-        with self._moveit.get_planning_scene_monitor().read_write() as scene:
-            # Remove from world collision objects, add as attached
-            scene.apply_attached_collision_object(aco)
-            scene.current_state.update()
+        srv_req = GetMotionPlan.Request()
+        srv_req.motion_plan_request = req_msg
+        result = _wait(self._plan_cli.call_async(srv_req),
+                       timeout=self._plan_time + 10.0)
+        if result is None:
+            return None
 
-        self._node.get_logger().debug(f"Attached {object_id} to {self._eef_link}")
+        resp = result.motion_plan_response
+        SUCCESS = 1
+        if resp.error_code.val != SUCCESS:
+            self._node.get_logger().debug(
+                f"Plan error code: {resp.error_code.val}")
+            return None
+        return resp.trajectory
 
-    def _detach_object(
-        self, object_id: str, px: float, py: float, pz: float
-    ) -> None:
-        """Detach the collision object from the EEF and place it in the world."""
-        aco = AttachedCollisionObject()
-        aco.link_name = self._eef_link
-        aco.object.id = object_id
-        aco.object.operation = CollisionObject.REMOVE
+    def _execute(self, trajectory) -> bool:
+        goal = ExecuteTrajectory.Goal()
+        goal.trajectory = trajectory
 
-        with self._moveit.get_planning_scene_monitor().read_write() as scene:
-            # Detach from robot
-            scene.apply_attached_collision_object(aco)
-            # Re-add to world at the target position so it blocks future paths
-            from shape_msgs.msg import SolidPrimitive
-            from geometry_msgs.msg import Pose as GmPose
-            co = CollisionObject()
-            co.id = object_id
-            co.header.frame_id = self._frame
-            co.operation = CollisionObject.ADD
-            prim = SolidPrimitive()
-            prim.type = SolidPrimitive.BOX
-            # Recover original size from the scene if available; use defaults
-            prim.dimensions = [0.040, 0.040, 0.030]
-            pose = GmPose()
-            pose.position.x = px
-            pose.position.y = py
-            pose.position.z = pz
-            pose.orientation.w = 1.0
-            co.primitives.append(prim)
-            co.primitive_poses.append(pose)
-            scene.apply_collision_object(co)
-            scene.current_state.update()
+        send_future = self._exec_cli.send_goal_async(goal)
+        goal_handle = _wait(send_future, timeout=10.0)
+        if goal_handle is None or not goal_handle.accepted:
+            self._node.get_logger().warn("Execution goal rejected")
+            return False
 
-        self._node.get_logger().debug(
-            f"Detached {object_id} and placed at ({px:.3f},{py:.3f},{pz:.3f})"
-        )
+        result_future = goal_handle.get_result_async()
+        result = _wait(result_future, timeout=60.0)
+        if result is None:
+            self._node.get_logger().warn("Execution timed out")
+            return False
+
+        SUCCESS = 1
+        ok = (result.result.error_code.val == SUCCESS)
+        if not ok:
+            self._node.get_logger().warn(
+                f"Execution error code: {result.result.error_code.val}")
+        return ok

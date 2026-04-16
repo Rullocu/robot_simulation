@@ -10,7 +10,6 @@
   <buildtool_depend>ament_python</buildtool_depend>
 
   <depend>rclpy</depend>
-  <depend>moveit_py</depend>
   <depend>geometry_msgs</depend>
   <depend>moveit_msgs</depend>
   <depend>shape_msgs</depend>
