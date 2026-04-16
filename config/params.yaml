@@ -35,14 +35,14 @@ pick_place_node:
 
     target_box_x: 0.230
     target_box_y: -0.180    # metres to the left
-    target_box_z: 0.050
+    target_box_z: 0.030
 
     # Box wall thickness (metres)
     box_wall_thickness: 0.004
 
     # Box height (metres) — independent of grid_layers so you can have
     # short visible walls even with a 1-layer grid.
-    box_height: 0.10
+    box_height: 0.06
 
     # Extra space inside the box around the product grid (each side).
     # Gives the gripper clearance to enter without hitting the walls.

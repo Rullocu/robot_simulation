@@ -187,7 +187,7 @@ class MotionPlanner:
     def pick_product(self, px: float, py: float, pz: float,
                      approach_h: float, retreat_h: float,
                      product_id: str) -> bool:
-        """approach → descend → remove product from scene → retreat"""
+        """approach → descend → attach product to EEF → retreat"""
         log = self._node.get_logger()
 
         if not self.move_to_pose(px, py, pz + approach_h):
@@ -198,8 +198,9 @@ class MotionPlanner:
             log.warn(f"[pick] descend failed for {product_id}")
             return False
 
-        # Simulate gripper close: remove product so it no longer blocks planning
-        self._scene.remove_collision_object(product_id)
+        # Simulate gripper close: attach product so it renders on the EEF
+        sx, sy, sz = self._prod_dims
+        self._scene.attach_to_eef(product_id, self._eef, sx, sy, sz)
         time.sleep(0.25)
 
         if not self.move_to_pose(px, py, pz + retreat_h):
@@ -210,7 +211,7 @@ class MotionPlanner:
     def place_product(self, px: float, py: float, pz: float,
                       approach_h: float, retreat_h: float,
                       product_id: str) -> bool:
-        """approach → descend → retreat → add product to scene at target"""
+        """approach → descend → detach (silent) → retreat → add product to world"""
         log = self._node.get_logger()
 
         if not self.move_to_pose(px, py, pz + approach_h):
@@ -221,12 +222,15 @@ class MotionPlanner:
             log.warn(f"[place] descend failed for {product_id}")
             return False
 
+        # Detach without adding world object first — avoids EEF/product overlap
+        # that would block retreat planning
+        self._scene.detach_object(product_id, self._eef)
         time.sleep(0.25)
 
         if not self.move_to_pose(px, py, pz + retreat_h):
             log.warn(f"[place] retreat failed")
 
-        # Simulate gripper open: add product back at the target position
+        # Now arm is clear — materialise the product at the target position
         sx, sy, sz = self._prod_dims
         self._scene.add_product(product_id, px, py, pz, sx, sy, sz)
 

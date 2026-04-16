@@ -15,6 +15,7 @@ from rclpy.node import Node
 
 from geometry_msgs.msg import Pose
 from moveit_msgs.msg import (
+    AttachedCollisionObject,
     CollisionObject,
     PlanningScene as PlanningSceneMsg,
 )
@@ -122,6 +123,60 @@ class SceneManager:
         """Add a product collision object at the given world position."""
         co = _box_co(obj_id, self._frame, cx, cy, cz, sx, sy, sz)
         self._apply_objects([co])
+
+    def attach_to_eef(self, obj_id: str, eef_link: str,
+                      sx: float, sy: float, sz: float) -> None:
+        """Remove product from world and attach it to the EEF with geometry.
+
+        The product is centred on the TCP (pose = identity in EEF frame),
+        so it renders correctly in RViz while the arm transports it.
+        """
+        # Build attached object WITH geometry so MoveIt renders it
+        aco = AttachedCollisionObject()
+        aco.link_name = eef_link
+        aco.object.id = obj_id
+        aco.object.header.frame_id = eef_link  # pose relative to EEF
+        aco.object.operation = CollisionObject.ADD
+
+        prim = SolidPrimitive()
+        prim.type = SolidPrimitive.BOX
+        prim.dimensions = [sx, sy, sz]
+        aco.object.primitives.append(prim)
+
+        pose = Pose()
+        pose.orientation.w = 1.0          # centred at TCP, aligned to EEF axes
+        aco.object.primitive_poses.append(pose)
+
+        aco.touch_links = [eef_link, "link6", "link5", "uflite_gripper_link"]
+
+        # Remove world object + attach to robot in one diff
+        co_remove = CollisionObject()
+        co_remove.id = obj_id
+        co_remove.operation = CollisionObject.REMOVE
+
+        diff = PlanningSceneMsg()
+        diff.is_diff = True
+        diff.robot_state.is_diff = True
+        diff.robot_state.attached_collision_objects.append(aco)
+        diff.world.collision_objects.append(co_remove)
+        self._apply_diff(diff)
+
+    def detach_object(self, obj_id: str, eef_link: str) -> None:
+        """Remove the attached object without adding it back to the world.
+
+        Call this before retreating; then call add_product() after the arm
+        has cleared the target box so the placed product doesn't block retreat.
+        """
+        aco_remove = AttachedCollisionObject()
+        aco_remove.link_name = eef_link
+        aco_remove.object.id = obj_id
+        aco_remove.object.operation = CollisionObject.REMOVE
+
+        diff = PlanningSceneMsg()
+        diff.is_diff = True
+        diff.robot_state.is_diff = True
+        diff.robot_state.attached_collision_objects.append(aco_remove)
+        self._apply_diff(diff)
 
     # ------------------------------------------------------------------
     # Internal
