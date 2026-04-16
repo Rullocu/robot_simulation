@@ -62,6 +62,8 @@ class PickPlaceNode(Node):
         self.declare_parameter("target_box_z", 0.050)
 
         self.declare_parameter("box_wall_thickness",   0.004)
+        self.declare_parameter("box_height",           0.10)
+        self.declare_parameter("box_margin",           0.030)
 
         # Motion
         self.declare_parameter("approach_height",       0.080)
@@ -143,6 +145,8 @@ def main(args=None):
     tgt_pos      = node.tgt_pos
     orientation  = node.orientation
     wall_t       = node.get_parameter("box_wall_thickness").value
+    box_height   = node.get_parameter("box_height").value
+    box_margin   = node.get_parameter("box_margin").value
     approach_h   = node.get_parameter("approach_height").value
     retreat_h    = node.get_parameter("retreat_height").value
     arm_group    = node.get_parameter("arm_group").value
@@ -177,7 +181,7 @@ def main(args=None):
     # Build scene
     # ------------------------------------------------------------------
     log.info("Setting up planning scene …")
-    scene.setup_scene(grid, prod, src_pos, tgt_pos, wall_t)
+    scene.setup_scene(grid, prod, src_pos, tgt_pos, wall_t, box_height, box_margin)
 
     # ------------------------------------------------------------------
     # Home

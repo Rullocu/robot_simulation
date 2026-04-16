@@ -84,17 +84,20 @@ class SceneManager:
     # ------------------------------------------------------------------
 
     def setup_scene(self, grid: dict, prod: dict,
-                    src_pos: tuple, tgt_pos: tuple, wall_t: float) -> None:
-        inner_x = grid["cols"]   * prod["size_x"]
-        inner_y = grid["rows"]   * prod["size_y"]
-        inner_z = grid["layers"] * prod["size_z"]
+                    src_pos: tuple, tgt_pos: tuple,
+                    wall_t: float, box_height: float, box_margin: float) -> None:
+        # Inner footprint = product grid + margin on each side for gripper clearance
+        inner_x = grid["cols"] * prod["size_x"] + 2 * box_margin
+        inner_y = grid["rows"] * prod["size_y"] + 2 * box_margin
+        # Wall height is set independently (box_height) so it stays short
+        # even when grid_layers is small.
 
         objects: List[CollisionObject] = []
         objects += self._table_objects(src_pos, tgt_pos, inner_x, inner_y)
         objects += self._open_box_objects("source_box", src_pos,
-                                          inner_x, inner_y, inner_z, wall_t)
+                                          inner_x, inner_y, box_height, wall_t)
         objects += self._open_box_objects("target_box", tgt_pos,
-                                          inner_x, inner_y, inner_z, wall_t)
+                                          inner_x, inner_y, box_height, wall_t)
         objects += self._product_objects(grid, prod, src_pos)
 
         # Apply in batches of 30 so the service call stays responsive
@@ -185,13 +188,13 @@ class SceneManager:
 
     def _open_box_objects(self, box_id: str, pos: tuple,
                           inner_x: float, inner_y: float,
-                          inner_z: float, wall_t: float) -> List[CollisionObject]:
+                          box_height: float, wall_t: float) -> List[CollisionObject]:
         """5-face open-top box. pos = centre of inner floor."""
         cx, cy, cz_floor = pos[0], pos[1], pos[2]
         outer_x = inner_x + 2 * wall_t
         hx, hy = inner_x / 2.0, inner_y / 2.0
-        z_wall_ctr = cz_floor + inner_z / 2.0          # wall centre Z
-        z_wall_h   = inner_z + wall_t                   # wall height
+        z_wall_ctr = cz_floor + box_height / 2.0       # wall centre Z
+        z_wall_h   = box_height + wall_t               # wall height
 
         return [
             # Floor (slightly below the product grid)
