@@ -17,7 +17,6 @@ from geometry_msgs.msg import Pose
 from moveit_msgs.msg import (
     CollisionObject,
     PlanningScene as PlanningSceneMsg,
-    AttachedCollisionObject,
 )
 from moveit_msgs.srv import ApplyPlanningScene
 from shape_msgs.msg import SolidPrimitive
@@ -85,12 +84,15 @@ class SceneManager:
 
     def setup_scene(self, grid: dict, prod: dict,
                     src_pos: tuple, tgt_pos: tuple,
-                    wall_t: float, box_height: float, box_margin: float) -> None:
-        # Inner footprint = product grid + margin on each side for gripper clearance
-        inner_x = grid["cols"] * prod["size_x"] + 2 * box_margin
-        inner_y = grid["rows"] * prod["size_y"] + 2 * box_margin
-        # Wall height is set independently (box_height) so it stays short
-        # even when grid_layers is small.
+                    wall_t: float, box_height: float,
+                    box_margin: float, product_spacing: float) -> None:
+        sx, sy = prod["size_x"], prod["size_y"]
+        cols, rows = grid["cols"], grid["rows"]
+
+        # Inner footprint:
+        #   (n products × size) + (n-1 gaps × spacing) + (2 × wall margin)
+        inner_x = cols * sx + max(cols - 1, 0) * product_spacing + 2 * box_margin
+        inner_y = rows * sy + max(rows - 1, 0) * product_spacing + 2 * box_margin
 
         objects: List[CollisionObject] = []
         objects += self._table_objects(src_pos, tgt_pos, inner_x, inner_y)
@@ -98,7 +100,7 @@ class SceneManager:
                                           inner_x, inner_y, box_height, wall_t)
         objects += self._open_box_objects("target_box", tgt_pos,
                                           inner_x, inner_y, box_height, wall_t)
-        objects += self._product_objects(grid, prod, src_pos)
+        objects += self._product_objects(grid, prod, src_pos, product_spacing)
 
         # Apply in batches of 30 so the service call stays responsive
         for i in range(0, len(objects), 30):
@@ -114,45 +116,12 @@ class SceneManager:
         co.operation = CollisionObject.REMOVE
         self._apply_objects([co])
 
-    def attach_to_eef(self, obj_id: str, eef_link: str,
-                      touch_links: List[str] | None = None) -> None:
-        """Move a world collision object into the robot's attached-object list."""
-        aco = AttachedCollisionObject()
-        aco.link_name = eef_link
-        aco.object.id = obj_id
-        aco.object.operation = CollisionObject.ADD
-        aco.touch_links = touch_links or [eef_link, "link6", "link5",
-                                           "uflite_gripper_link"]
-
-        # Remove from world + attach to robot in one diff
-        co_remove = CollisionObject()
-        co_remove.id = obj_id
-        co_remove.operation = CollisionObject.REMOVE
-
-        diff = PlanningSceneMsg()
-        diff.is_diff = True
-        diff.robot_state.is_diff = True
-        diff.robot_state.attached_collision_objects.append(aco)
-        diff.world.collision_objects.append(co_remove)
-        self._apply_diff(diff)
-
-    def detach_and_place(self, obj_id: str, eef_link: str,
-                         px: float, py: float, pz: float,
-                         sx: float, sy: float, sz: float) -> None:
-        """Detach a held object and re-add it to the world at (px, py, pz)."""
-        aco_remove = AttachedCollisionObject()
-        aco_remove.link_name = eef_link
-        aco_remove.object.id = obj_id
-        aco_remove.object.operation = CollisionObject.REMOVE
-
-        co_add = _box_co(obj_id, self._frame, px, py, pz, sx, sy, sz)
-
-        diff = PlanningSceneMsg()
-        diff.is_diff = True
-        diff.robot_state.is_diff = True
-        diff.robot_state.attached_collision_objects.append(aco_remove)
-        diff.world.collision_objects.append(co_add)
-        self._apply_diff(diff)
+    def add_product(self, obj_id: str,
+                    cx: float, cy: float, cz: float,
+                    sx: float, sy: float, sz: float) -> None:
+        """Add a product collision object at the given world position."""
+        co = _box_co(obj_id, self._frame, cx, cy, cz, sx, sy, sz)
+        self._apply_objects([co])
 
     # ------------------------------------------------------------------
     # Internal
@@ -220,10 +189,14 @@ class SceneManager:
         ]
 
     def _product_objects(self, grid: dict, prod: dict,
-                         src_pos: tuple) -> List[CollisionObject]:
+                         src_pos: tuple,
+                         spacing: float) -> List[CollisionObject]:
         sx, sy, sz = prod["size_x"], prod["size_y"], prod["size_z"]
-        x0 = src_pos[0] - (grid["cols"] * sx) / 2.0 + sx / 2.0
-        y0 = src_pos[1] - (grid["rows"] * sy) / 2.0 + sy / 2.0
+        step_x = sx + spacing
+        step_y = sy + spacing
+        # Centre of the whole product arrangement, offset per column/row
+        x0 = src_pos[0] - (grid["cols"] - 1) * step_x / 2.0
+        y0 = src_pos[1] - (grid["rows"] - 1) * step_y / 2.0
 
         objects = []
         for layer in range(grid["layers"]):
@@ -231,8 +204,8 @@ class SceneManager:
                 for col in range(grid["cols"]):
                     objects.append(_box_co(
                         f"product_{col}_{row}_{layer}", self._frame,
-                        x0 + col * sx,
-                        y0 + row * sy,
+                        x0 + col * step_x,
+                        y0 + row * step_y,
                         src_pos[2] + layer * sz + sz / 2.0,
                         sx, sy, sz,
                     ))

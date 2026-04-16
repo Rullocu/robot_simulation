@@ -64,6 +64,7 @@ class PickPlaceNode(Node):
         self.declare_parameter("box_wall_thickness",   0.004)
         self.declare_parameter("box_height",           0.10)
         self.declare_parameter("box_margin",           0.030)
+        self.declare_parameter("product_spacing",      0.030)
 
         # Motion
         self.declare_parameter("approach_height",       0.080)
@@ -145,8 +146,9 @@ def main(args=None):
     tgt_pos      = node.tgt_pos
     orientation  = node.orientation
     wall_t       = node.get_parameter("box_wall_thickness").value
-    box_height   = node.get_parameter("box_height").value
-    box_margin   = node.get_parameter("box_margin").value
+    box_height      = node.get_parameter("box_height").value
+    box_margin      = node.get_parameter("box_margin").value
+    product_spacing = node.get_parameter("product_spacing").value
     approach_h   = node.get_parameter("approach_height").value
     retreat_h    = node.get_parameter("retreat_height").value
     arm_group    = node.get_parameter("arm_group").value
@@ -161,6 +163,8 @@ def main(args=None):
     sx = prod["size_x"]
     sy = prod["size_y"]
     sz = prod["size_z"]
+    step_x = sx + product_spacing   # centre-to-centre distance between columns
+    step_y = sy + product_spacing   # centre-to-centre distance between rows
     total = grid["cols"] * grid["rows"] * grid["layers"]
     limit = total if max_products < 0 else min(max_products, total)
 
@@ -181,7 +185,8 @@ def main(args=None):
     # Build scene
     # ------------------------------------------------------------------
     log.info("Setting up planning scene …")
-    scene.setup_scene(grid, prod, src_pos, tgt_pos, wall_t, box_height, box_margin)
+    scene.setup_scene(grid, prod, src_pos, tgt_pos,
+                      wall_t, box_height, box_margin, product_spacing)
 
     # ------------------------------------------------------------------
     # Home
@@ -191,11 +196,12 @@ def main(args=None):
 
     # ------------------------------------------------------------------
     # Grid origins  (centre of the [col=0, row=0] product)
+    # The whole arrangement is centred on the box centre.
     # ------------------------------------------------------------------
-    src_x0 = src_pos[0] - (grid["cols"] * sx) / 2.0 + sx / 2.0
-    src_y0 = src_pos[1] - (grid["rows"] * sy) / 2.0 + sy / 2.0
-    tgt_x0 = tgt_pos[0] - (grid["cols"] * sx) / 2.0 + sx / 2.0
-    tgt_y0 = tgt_pos[1] - (grid["rows"] * sy) / 2.0 + sy / 2.0
+    src_x0 = src_pos[0] - (grid["cols"] - 1) * step_x / 2.0
+    src_y0 = src_pos[1] - (grid["rows"] - 1) * step_y / 2.0
+    tgt_x0 = tgt_pos[0] - (grid["cols"] - 1) * step_x / 2.0
+    tgt_y0 = tgt_pos[1] - (grid["rows"] - 1) * step_y / 2.0
 
     # ------------------------------------------------------------------
     # Pick-and-place loop  (top layer first)
@@ -221,12 +227,12 @@ def main(args=None):
 
                 pid = f"product_{col}_{row}_{layer}"
 
-                pick_x  = src_x0 + col * sx
-                pick_y  = src_y0 + row * sy
+                pick_x  = src_x0 + col * step_x
+                pick_y  = src_y0 + row * step_y
                 pick_z  = src_pos[2] + layer * sz + sz / 2.0
 
-                place_x = tgt_x0 + col * sx
-                place_y = tgt_y0 + row * sy
+                place_x = tgt_x0 + col * step_x
+                place_y = tgt_y0 + row * step_y
                 place_z = tgt_pos[2] + layer * sz + sz / 2.0
 
                 log.info(
@@ -241,7 +247,6 @@ def main(args=None):
                 if ok:
                     planner.place_product(
                         place_x, place_y, place_z, approach_h, retreat_h, pid)
-                    scene.remove_collision_object(pid)
                     success += 1
                     log.info(f"  ✓ {pid} placed")
                 else:

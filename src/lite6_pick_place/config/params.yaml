@@ -8,10 +8,10 @@ pick_place_node:
     # ----------------------------------------------------------
     # Product grid  (cols × rows × layers = total products)
     # Full task spec: 3 × 5 × 10 = 150 products
-    # Single-product test: 1 × 1 × 1
+    # 2×2 placement test:  2 × 2 × 1 = 4 products
     # ----------------------------------------------------------
-    grid_cols:   1        # products along X axis
-    grid_rows:   1        # products along Y axis
+    grid_cols:   2        # products along X axis
+    grid_rows:   2        # products along Y axis
     grid_layers: 1        # products stacked in Z
 
     # ----------------------------------------------------------
@@ -48,11 +48,15 @@ pick_place_node:
     # Gives the gripper clearance to enter without hitting the walls.
     box_margin: 0.030
 
+    # Gap between adjacent products (centre-to-centre = product_size + spacing).
+    # Also used as the minimum distance from each product edge to the box wall.
+    product_spacing: 0.030
+
     # ----------------------------------------------------------
     # Motion parameters
     # ----------------------------------------------------------
-    approach_height: 0.080  # metres above product centre before descend
-    retreat_height:  0.120  # metres above product centre after pick/place
+    approach_height: 0.110  # must be > (box_height - product_z/2) so gripper clears rim
+    retreat_height:  0.130  # metres above product centre after pick/place
 
     # MoveIt2 planning group and end-effector link.
     # With add_gripper:=true the TCP link is 'link_tcp'.
@@ -71,7 +75,7 @@ pick_place_node:
     # Demo limiter  (-1 = run all products)
     # Set to a small number (e.g. 6) for a quick first run.
     # ----------------------------------------------------------
-    max_products: -1   # -1 = all (grid is 1x1x1, so exactly 1 product)
+    max_products: -1   # -1 = all products in the grid
 
     # ----------------------------------------------------------
     # Pick orientation — quaternion for EEF pointing straight
