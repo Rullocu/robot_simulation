@@ -31,7 +31,7 @@ pick_place_node:
     # ----------------------------------------------------------
     source_box_x: 0.230     # metres in front of robot
     source_box_y: 0.180     # metres to the right
-    source_box_z: 0.050     # height of box floor above robot base
+    source_box_z: 0.030     # height of box floor above robot base
 
     target_box_x: 0.230
     target_box_y: -0.180    # metres to the left
@@ -56,7 +56,7 @@ pick_place_node:
     # Motion parameters
     # ----------------------------------------------------------
     approach_height: 0.110  # must be > (box_height - product_z/2) so gripper clears rim
-    retreat_height:  0.130  # metres above product centre after pick/place
+    retreat_height:  0.150  # metres above product centre after pick/place
 
     # MoveIt2 planning group and end-effector link.
     # With add_gripper:=true the TCP link is 'link_tcp'.
