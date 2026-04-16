@@ -7,8 +7,9 @@ No moveit_py required — only moveit_msgs + rclpy action client.
 
 Services used
 -------------
-  /plan_kinematic_path  (moveit_msgs/srv/GetMotionPlan)
-  /apply_planning_scene (moveit_msgs/srv/ApplyPlanningScene)
+  /plan_kinematic_path    (moveit_msgs/srv/GetMotionPlan)
+  /compute_cartesian_path (moveit_msgs/srv/GetCartesianPath)
+  /apply_planning_scene   (moveit_msgs/srv/ApplyPlanningScene)
 
 Actions used
 ------------
@@ -33,7 +34,7 @@ from moveit_msgs.msg import (
     OrientationConstraint,
     PositionConstraint,
 )
-from moveit_msgs.srv import ApplyPlanningScene, GetMotionPlan
+from moveit_msgs.srv import ApplyPlanningScene, GetCartesianPath, GetMotionPlan
 from shape_msgs.msg import SolidPrimitive
 
 from .scene_manager import SceneManager
@@ -160,10 +161,13 @@ class MotionPlanner:
 
         # Service clients and action client
         self._plan_cli = node.create_client(GetMotionPlan, "/plan_kinematic_path")
+        self._cart_cli = node.create_client(GetCartesianPath, "/compute_cartesian_path")
         self._exec_cli = ActionClient(node, ExecuteTrajectory, "/execute_trajectory")
 
         self._node.get_logger().info("Waiting for /plan_kinematic_path …")
         self._plan_cli.wait_for_service(timeout_sec=30.0)
+        self._node.get_logger().info("Waiting for /compute_cartesian_path …")
+        self._cart_cli.wait_for_service(timeout_sec=30.0)
         self._node.get_logger().info("Waiting for /execute_trajectory …")
         self._exec_cli.wait_for_server(timeout_sec=30.0)
         self._node.get_logger().info("Motion planner ready.")
@@ -178,59 +182,112 @@ class MotionPlanner:
         return self._plan_and_execute(c, label="home")
 
     def move_to_pose(self, x: float, y: float, z: float) -> bool:
-        """Move EEF to (x, y, z) with the configured pick orientation."""
+        """Move EEF to (x, y, z) with the configured pick orientation (OMPL)."""
         qx, qy, qz, qw = self._orient
         goal = _pose(x, y, z, qx, qy, qz, qw)
         c = _build_pose_constraints(self._frame, self._eef, goal)
         return self._plan_and_execute(c, label=f"({x:.3f},{y:.3f},{z:.3f})")
 
+    def move_cartesian(self, x: float, y: float, z: float) -> bool:
+        """Move EEF in a straight Cartesian line to (x, y, z).
+
+        Used for descend and ascent so the gripper never arcs through a
+        product's bounding box — the root cause of ValidateSolution failures
+        when OMPL chooses a curved joint-space path for short vertical moves.
+        """
+        qx, qy, qz, qw = self._orient
+        waypoint = _pose(x, y, z, qx, qy, qz, qw)
+
+        req = GetCartesianPath.Request()
+        req.header.frame_id   = self._frame
+        req.group_name        = self._group
+        req.link_name         = self._eef
+        req.waypoints         = [waypoint]
+        req.max_step          = 0.005      # 5 mm interpolation resolution
+        req.jump_threshold    = 0.0        # disable jump check
+        req.avoid_collisions  = True
+
+        result = _wait(self._cart_cli.call_async(req),
+                       timeout=self._plan_time + 10.0)
+        if result is None:
+            self._node.get_logger().warn(
+                f"[cartesian] service timed out for ({x:.3f},{y:.3f},{z:.3f})")
+            return False
+
+        if result.fraction < 0.99:
+            self._node.get_logger().warn(
+                f"[cartesian] only {result.fraction*100:.0f}% of path computed "
+                f"for ({x:.3f},{y:.3f},{z:.3f})")
+            return False
+
+        return self._execute(result.solution)
+
     def pick_product(self, px: float, py: float, pz: float,
                      approach_h: float, retreat_h: float,
                      product_id: str) -> bool:
-        """approach → descend → attach product to EEF → retreat"""
+        """OMPL approach → Cartesian descend → attach → Cartesian ascent
+
+        Descend and ascent use Cartesian path planning (straight vertical line)
+        so the gripper body can never arc sideways into the product bounding box.
+        """
         log = self._node.get_logger()
 
+        # OMPL: free motion to approach height (no obstacle near here)
         if not self.move_to_pose(px, py, pz + approach_h):
             log.warn(f"[pick] approach failed for {product_id}")
             return False
 
-        if not self.move_to_pose(px, py, pz):
+        # Cartesian: straight vertical drop — no arc, no path collision
+        if not self.move_cartesian(px, py, pz):
             log.warn(f"[pick] descend failed for {product_id}")
             return False
 
-        # Simulate gripper close: attach product so it renders on the EEF
+        # Simulate gripper close
         sx, sy, sz = self._prod_dims
         self._scene.attach_to_eef(product_id, self._eef, sx, sy, sz)
         time.sleep(0.25)
 
-        if not self.move_to_pose(px, py, pz + retreat_h):
-            log.warn(f"[pick] retreat failed")
+        # Cartesian: straight vertical lift
+        if not self.move_cartesian(px, py, pz + retreat_h):
+            log.warn(f"[pick] ascent failed for {product_id}")
 
         return True
 
     def place_product(self, px: float, py: float, pz: float,
                       approach_h: float, retreat_h: float,
                       product_id: str) -> bool:
-        """approach → descend → detach (silent) → retreat → add product to world"""
+        """OMPL transit → OMPL approach → Cartesian descend → detach → Cartesian ascent
+
+        Same principle: Cartesian for all vertical moves near obstacles.
+        """
         log = self._node.get_logger()
 
+        transit_z = pz + retreat_h
+
+        # OMPL: lateral move at safe transit height
+        if not self.move_to_pose(px, py, transit_z):
+            log.warn(f"[place] transit failed for {product_id}")
+            return False
+
+        # OMPL: descend to approach height (still above box rim, no product yet)
         if not self.move_to_pose(px, py, pz + approach_h):
             log.warn(f"[place] approach failed for {product_id}")
             return False
 
-        if not self.move_to_pose(px, py, pz):
+        # Cartesian: straight vertical drop into target box
+        if not self.move_cartesian(px, py, pz):
             log.warn(f"[place] descend failed for {product_id}")
             return False
 
-        # Detach without adding world object first — avoids EEF/product overlap
-        # that would block retreat planning
+        # Simulate gripper open
         self._scene.detach_object(product_id, self._eef)
         time.sleep(0.25)
 
-        if not self.move_to_pose(px, py, pz + retreat_h):
-            log.warn(f"[place] retreat failed")
+        # Cartesian: straight vertical lift out of target box
+        if not self.move_cartesian(px, py, transit_z):
+            log.warn(f"[place] ascent failed for {product_id}")
 
-        # Now arm is clear — materialise the product at the target position
+        # Arm is clear — materialise the product at the target position
         sx, sy, sz = self._prod_dims
         self._scene.add_product(product_id, px, py, pz, sx, sy, sz)
 
